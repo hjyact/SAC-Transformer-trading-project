@@ -1,0 +1,9 @@
+torch
+numpy
+pandas
+matplotlib
+gymnasium
+yfinance
+scipy
+pyarrow
+optuna

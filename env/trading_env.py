@@ -78,6 +78,15 @@ class TradingEnv(gym.Env):
         self.n_steps  = len(self.features)
         self.n_feat   = self.features.shape[1]
 
+        # 데이터 길이 검증 (window_size + 1 이상의 데이터 필수)
+        if self.n_steps <= cfg.window_size:
+            mode_str = "훈련" if self.mode == "train" else "평가/테스트"
+            raise ValueError(
+                f"데이터 부족: {mode_str} 데이터({self.n_steps}행)가 "
+                f"윈도우 크기({cfg.window_size})보다 작거나 같습니다. "
+                f"더 긴 기간의 데이터를 제공하거나 window_size를 줄이세요."
+            )
+
         # 피처 정규화 통계
         # 외부 주입 우선 (eval 환경에 train 통계 전달 → look-ahead 차단)
         if feat_mean is not None and feat_std is not None:

@@ -120,7 +120,7 @@ class EnvConfig:
     # 행동 변화 패널티 (Mysore CAPS 2021 의 env-level 변형)
     # 0.5~1.0 권장 — actor loss 의 λ_T 가 Q 값에 묻히는 문제 우회.
     # 과매매 (현실에서 매일 매매) 를 reward 수준에서 직접 억제.
-    action_change_penalty: float = 0.5
+    action_change_penalty: float = 0.1
 
     # ── Differential Sharpe Ratio (Moody & Saffell 2001)
     # 매 step 의 Sharpe 증분을 보상으로 — risk-adjusted return 직접 최적화
@@ -176,7 +176,7 @@ class SACConfig:
     # gamma=0.97 권장 — 0.99 는 Q ≈ E[r]/(1-γ) = 100·E[r] 까지 누적 →
     # 음수 r 영역에서 Q 폭주 (π_loss=+99 의 원인). 0.97 은 효율적 horizon ≈ 33 step
     # (≈ 1.5개월) — 단기 트레이딩 의사결정에 더 적합 (Andrychowicz 2021).
-    gamma: float            = 0.97
+    gamma: float            = 0.99
     tau: float              = 0.005          # Soft target update 계수
     alpha: float            = 0.2            # 초기 엔트로피 온도
     auto_alpha: bool        = True           # 자동 엔트로피 조정 (SAC-v2)
@@ -320,7 +320,7 @@ class TrainConfig:
     #
     # 기본 sharpe — 합성/실제 데이터 모두에서 모델의 *학습 자체* 진단에 적합.
     # 실거래 의사결정이 목적이면 학습 끝난 후 alpha_vs_bh / calmar 도 함께 확인.
-    best_metric: str        = "sharpe"
+    best_metric: str        = "calmar"
     # Best 갱신의 최소 마진. metric < best_min_margin 이면 best 갱신 안 함.
     # sharpe 기준 0.0 = 음수 Sharpe 모델 차단 (random 보다 못한 모델 방지).
     # alpha_vs_bh 로 바꾸면 0.0 = B&H 못 이기는 모델 차단.
@@ -329,7 +329,7 @@ class TrainConfig:
     # ── Early Stopping
     # eval 가 best 갱신 안 되면 patience 후 학습 자동 중단.
     # patience=10 → eval_interval×10 = 50k step 동안 갱신 없으면 중단.
-    early_stop_patience: int = 10
+    early_stop_patience: int = 15
 
 
 env_cfg     = EnvConfig()

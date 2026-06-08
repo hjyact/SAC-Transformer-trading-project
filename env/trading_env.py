@@ -342,12 +342,16 @@ class TradingEnv(gym.Env):
             mdd_pen   = cfg.drawdown_penalty * min(mdd_ratio, 0.0)
             cost_pen  = -cfg.risk_penalty * cost_norm * 100.0
             leverage_pen = -0.02 * max(0.0, abs(self.position) - 0.8) ** 2
+            # 포지션 없이 현금 보유하면 market uptrend를 놓치는 기회비용 패널티:
+            # long-only 시장에서 position≈0 전략이 Sharpe를 독점하는 함정 방지.
+            inaction_pen = -0.01 * (1.0 - abs(self.position)) * max(step_ret, 0.0) * 100.0
 
             reward = (
                 sharpe * cfg.reward_scaling
                 + mdd_pen
                 + cost_pen
                 + leverage_pen
+                + inaction_pen
                 - a_pen
             )
             return float(np.clip(reward, -5.0, 5.0))
@@ -437,8 +441,7 @@ class TradingEnv(gym.Env):
                 if sigma > 0.0:
                     noise = self.np_random.normal(
                         0.0, sigma, size=window_norm.shape
-                    )
-astype(np.float32)
+                    ).astype(np.float32)
                     window_norm = window_norm + noise
 
         window_norm = np.clip(window_norm, -10.0, 10.0)

@@ -437,7 +437,8 @@ class TradingEnv(gym.Env):
                 if sigma > 0.0:
                     noise = self.np_random.normal(
                         0.0, sigma, size=window_norm.shape
-                    ).astype(np.float32)
+                    )
+astype(np.float32)
                     window_norm = window_norm + noise
 
         window_norm = np.clip(window_norm, -10.0, 10.0)

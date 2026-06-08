@@ -462,7 +462,19 @@ def run_training(args):
 # ── 평가만 실행 ────────────────────────────────────────
 
 def run_eval_only(args):
-    train_data, test_data = prepare_data(args)
+    # eval 모드에서는 사용자가 지정한 전체 기간을 테스트셋으로 사용하는 경우가 많음.
+    # --test-ratio 를 1.0으로 강제하여 전체를 eval_env 에 할당.
+    original_test_ratio = args.test_ratio
+    args.test_ratio = 1.0
+    try:
+        train_data, test_data = prepare_data(args)
+    finally:
+        args.test_ratio = original_test_ratio
+
+    # train_data 가 비어있으면 (test_ratio=1.0) test_data 를 정규화 통계용으로 사용
+    if len(train_data[0]) == 0:
+        train_data = test_data
+
     _, eval_env, agent, _ = build_env_and_agent(train_data, test_data, args)
 
     logger.info(f"모델 로드: {args.load}")

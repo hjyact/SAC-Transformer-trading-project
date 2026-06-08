@@ -91,7 +91,8 @@ RUNTIME_INFO = configure_runtime()
 @dataclass
 class EnvConfig:
     # 관측 윈도우 (과거 몇 봉을 state로 볼 것인가)
-    window_size: int        = 30
+    # 60봉 (3개월) — 중기 추세 인식. 30봉은 국지적 노이즈에 취약.
+    window_size: int        = 60
 
     # 포트폴리오
     initial_capital: float  = 1_000_000.0   # 초기 자본 (원)
@@ -100,14 +101,14 @@ class EnvConfig:
     max_position: float     = 1.0            # 최대 포지션 (자본의 100%)
 
     # 보상 설계
-    reward_type: str        = "sharpe"       # "pnl" | "sharpe" | "sortino" | "mixed"
+    reward_type: str        = "mixed"        # "pnl" | "sharpe" | "sortino" | "mixed"
     # reward_scaling=0.1 권장 (Q값/π_loss 폭주 방지):
     #   sharpe reward 는 -5~+5 clip 인데 step 평균 ≈0.3 → 252 step 누적 ≈75 →
     #   Q값이 너무 커져 SAC entropy term (α·log_p) 이 묻히고 정책이 Q-greedy 로 빠짐.
     #   0.1 배 스케일이면 Q ≈ 5~15 정도로 entropy/policy balance 회복.
     reward_scaling: float   = 0.1
     risk_penalty: float     = 0.1            # 과도한 리스크 패널티 계수
-    drawdown_penalty: float = 0.5            # MDD 패널티
+    drawdown_penalty: float = 0.3            # MDD 패널티
 
     # 에피소드
     # 126 (반년) 권장 — episode 다양성 ↑, eval random-start 와 결합 시 OOS 추정 안정.
@@ -120,7 +121,7 @@ class EnvConfig:
     # 행동 변화 패널티 (Mysore CAPS 2021 의 env-level 변형)
     # 0.5~1.0 권장 — actor loss 의 λ_T 가 Q 값에 묻히는 문제 우회.
     # 과매매 (현실에서 매일 매매) 를 reward 수준에서 직접 억제.
-    action_change_penalty: float = 0.1
+    action_change_penalty: float = 0.3
 
     # ── Differential Sharpe Ratio (Moody & Saffell 2001)
     # 매 step 의 Sharpe 증분을 보상으로 — risk-adjusted return 직접 최적화
@@ -176,11 +177,11 @@ class SACConfig:
     # gamma=0.97 권장 — 0.99 는 Q ≈ E[r]/(1-γ) = 100·E[r] 까지 누적 →
     # 음수 r 영역에서 Q 폭주 (π_loss=+99 의 원인). 0.97 은 효율적 horizon ≈ 33 step
     # (≈ 1.5개월) — 단기 트레이딩 의사결정에 더 적합 (Andrychowicz 2021).
-    gamma: float            = 0.99
+    gamma: float            = 0.97
     tau: float              = 0.005          # Soft target update 계수
     alpha: float            = 0.2            # 초기 엔트로피 온도
     auto_alpha: bool        = True           # 자동 엔트로피 조정 (SAC-v2)
-    target_entropy: float   = -1.0           # 목표 엔트로피 (-action_dim)
+    target_entropy: float   = -0.5          # 목표 엔트로피 (-action_dim * 0.5 → 더 많은 탐색 유지)
 
     # 리플레이 버퍼
     buffer_size: int        = 100_000
@@ -305,9 +306,9 @@ class FeatureConfig:
 # ── 학습 설정 ──────────────────────────────────────────
 @dataclass
 class TrainConfig:
-    total_timesteps: int    = 200_000
+    total_timesteps: int    = 300_000
     eval_interval: int      = 5_000
-    eval_episodes: int      = 5      # 다양한 시작점에서 5회 평가 (env_cfg.eval_random_start=True 가정)
+    eval_episodes: int      = 10     # 다양한 시작점에서 10회 평가 → eval Sharpe 분산 감소
     save_interval: int      = 10_000
     log_interval: int       = 1_000
     seed: int               = 42
@@ -320,16 +321,16 @@ class TrainConfig:
     #
     # 기본 sharpe — 합성/실제 데이터 모두에서 모델의 *학습 자체* 진단에 적합.
     # 실거래 의사결정이 목적이면 학습 끝난 후 alpha_vs_bh / calmar 도 함께 확인.
-    best_metric: str        = "calmar"
+    best_metric: str        = "alpha_vs_bh"
     # Best 갱신의 최소 마진. metric < best_min_margin 이면 best 갱신 안 함.
-    # sharpe 기준 0.0 = 음수 Sharpe 모델 차단 (random 보다 못한 모델 방지).
-    # alpha_vs_bh 로 바꾸면 0.0 = B&H 못 이기는 모델 차단.
-    best_min_margin: float  = 0.0
+    # alpha_vs_bh 기준: -0.05 = B&H 대비 5%p 이내 손실까지는 best 허용.
+    # 초기 학습에서 B&H를 완전히 이기기 어려우므로 약간의 여유 부여.
+    best_min_margin: float  = -0.05
 
     # ── Early Stopping
     # eval 가 best 갱신 안 되면 patience 후 학습 자동 중단.
-    # patience=10 → eval_interval×10 = 50k step 동안 갱신 없으면 중단.
-    early_stop_patience: int = 15
+    # patience=20 → eval_interval×20 = 100k step 동안 갱신 없으면 중단.
+    early_stop_patience: int = 20
 
 
 env_cfg     = EnvConfig()

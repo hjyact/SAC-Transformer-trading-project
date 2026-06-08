@@ -139,6 +139,10 @@ class TradingEnv(gym.Env):
         self._step_idx = self._start
         self._end      = min(self._start + self.cfg.episode_length, self.n_steps - 1)
 
+        # B&H 기준가: 에피소드 시작 시점 종가
+        self._bh_start_price = float(self.prices.iloc[self._start]["Close"])
+        self._bh_capital = self.cfg.initial_capital
+
         # ── Train-time data augmentation 준비 (eval/실거래 경로 영향 X)
         self._setup_episode_augmentation()
 
@@ -212,6 +216,9 @@ class TradingEnv(gym.Env):
         self._dsr_A = 0.0
         self._dsr_B = 0.0
 
+        # B&H 추적 (alpha vs B&H 보상/평가용)
+        self._bh_capital = self.cfg.initial_capital
+
         # Train-time augmentation state — reset() 에서 _setup_episode_augmentation()
         # 이 덮어쓰지만, step() 호출이 reset() 전에 일어나도 안전하도록 초기화.
         self._eff_commission = self.cfg.commission
@@ -275,9 +282,13 @@ class TradingEnv(gym.Env):
         step_ret = position_pnl / (self.capital + 1e-9)
         self._ret_history.append(step_ret)
 
+        # B&H 스텝 수익률 (항상 100% 롱 포지션)
+        bh_step_ret = price_ret
+        self._bh_capital = self._bh_capital * (1.0 + price_ret)
+
         # 행동 변화량: 현재 step 의 입력 action 과 직전 입력의 차
         action_delta = abs(target_pos - self.prev_action)
-        reward = self._compute_reward(step_ret, trade_cost, action_delta)
+        reward = self._compute_reward(step_ret, trade_cost, action_delta, bh_step_ret)
         self.prev_action = target_pos
 
         # 종료 조건
@@ -292,7 +303,7 @@ class TradingEnv(gym.Env):
     # ── 보상 함수 ──────────────────────────────────────
 
     def _compute_reward(self, step_ret: float, trade_cost: float,
-                        action_delta: float = 0.0) -> float:
+                        action_delta: float = 0.0, bh_step_ret: float = 0.0) -> float:
         """
         보상 설계 원칙:
           - 모든 보상은 [-5, +5] 범위 내로 클리핑
@@ -344,7 +355,14 @@ class TradingEnv(gym.Env):
             leverage_pen = -0.02 * max(0.0, abs(self.position) - 0.8) ** 2
             # 포지션 없이 현금 보유하면 market uptrend를 놓치는 기회비용 패널티:
             # long-only 시장에서 position≈0 전략이 Sharpe를 독점하는 함정 방지.
-            inaction_pen = -0.01 * (1.0 - abs(self.position)) * max(step_ret, 0.0) * 100.0
+            inaction_pen = -0.05 * (1.0 - abs(self.position)) * max(step_ret, 0.0) * 100.0
+
+            # ── Alpha vs B&H 직접 보상 (핵심):
+            # agent_step_ret - bh_step_ret = price_ret * (position - 1)
+            # 상승장 현금 보유 → 음수 패널티, 하락장 현금 보유 → 양수 보상
+            # 이 항이 없으면 Sharpe 최적화가 항상 현금 보유를 선호함.
+            alpha_step = step_ret - bh_step_ret
+            alpha_reward = alpha_step * 10.0
 
             reward = (
                 sharpe * cfg.reward_scaling
@@ -352,6 +370,7 @@ class TradingEnv(gym.Env):
                 + cost_pen
                 + leverage_pen
                 + inaction_pen
+                + alpha_reward
                 - a_pen
             )
             return float(np.clip(reward, -5.0, 5.0))
@@ -465,6 +484,7 @@ class TradingEnv(gym.Env):
     def _get_info(self, step_ret, trade_cost, cur_price) -> Dict:
         total_ret = (self.capital - self.cfg.initial_capital) / self.cfg.initial_capital
         mdd = (self.capital - self.peak_capital) / (self.peak_capital + 1e-9)
+        bh_total_ret = (self._bh_capital - self.cfg.initial_capital) / self.cfg.initial_capital
         return {
             "capital":    self.capital,
             "position":   self.position,
@@ -474,6 +494,7 @@ class TradingEnv(gym.Env):
             "trade_cost": trade_cost,
             "trade_count": self._trade_count,
             "cur_price":  cur_price,
+            "bh_total_ret": bh_total_ret,
         }
 
     # ── 렌더링 ─────────────────────────────────────────

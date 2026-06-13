@@ -43,6 +43,12 @@ def build_all_features(df: pd.DataFrame, cfg) -> pd.DataFrame:
     if cfg.use_hurst:
         f = _hurst_features(f)
 
+    if getattr(cfg, "use_momentum", False):
+        f = _momentum_features(f, cfg)
+
+    if getattr(cfg, "use_regime", False):
+        f = _regime_features(f)
+
     # Fractional Differentiation (López de Prado 2018 Ch.5)
     # log_ret 의 메모리 손실 보완 — 정상성+메모리 양립
     if getattr(cfg, "use_frac_diff", False):
@@ -535,6 +541,102 @@ def _frac_diff_features(df: pd.DataFrame, cfg) -> pd.DataFrame:
 
 
 # ── 포트폴리오 상태 피처 ───────────────────────────────
+
+# ── 모멘텀 피처 (Jegadeesh & Titman 1993) ────────────────
+
+def _momentum_features(df: pd.DataFrame, cfg) -> pd.DataFrame:
+    """
+    다중 주기 가격 모멘텀 피처.
+
+    이론:
+      - Cross-sectional Momentum (Jegadeesh & Titman 1993):
+          12개월 과거 수익률이 높은 종목이 다음 달도 좋음 (모멘텀 효과)
+      - 52주 고가 근접도 (George & Hwang 2004):
+          52주 고가 근처에 있을수록 상승 가능성 ↑ (앵커링 효과)
+      - 다중 스케일 캡처 (1M/3M/6M/12M) → 단기~장기 모멘텀 동시 반영
+
+    구현:
+      - 각 기간 ROC 를 rolling z-score 정규화 → 분포 일관성 확보
+      - 52주 고가/저가 대비 현재 위치 (거리)
+      - RSI 기울기 (5일 RSI 변화) → 모멘텀 가속도
+      - 거래량 모멘텀 (OBV 기울기) → 가격모멘텀 확인
+    """
+    c = df["Close"]
+    mom_windows = getattr(cfg, "mom_windows", [21, 63, 126, 252])
+
+    for w in mom_windows:
+        roc = c.pct_change(w)
+        mu = roc.rolling(252, min_periods=60).mean()
+        sd = roc.rolling(252, min_periods=60).std() + 1e-8
+        df[f"mom_{w}"] = ((roc - mu) / sd).clip(-5, 5)
+
+    # 52주 고가/저가 근접도 (George & Hwang 2004)
+    roll252 = max(252, c.count() // 4)
+    df["dist_52w_high"] = (c / c.rolling(252, min_periods=60).max() - 1.0).clip(-1, 0)
+    df["dist_52w_low"]  = (c / c.rolling(252, min_periods=60).min() - 1.0).clip(0, 5)
+
+    # 모멘텀 가속도: 단기 수익률 - 중기 수익률 (추세 전환 신호)
+    ret = np.log(c / c.shift(1))
+    df["mom_accel"] = ret.rolling(10).mean() - ret.rolling(60).mean()
+
+    # RSI 기울기 (5일 변화)
+    if "rsi" in df.columns:
+        df["rsi_slope"] = (df["rsi"].diff(5) / 5.0 / 100.0).clip(-0.1, 0.1)
+
+    # OBV 모멘텀 기울기 (거래량 추세 방향)
+    if "obv_mom" in df.columns:
+        df["obv_slope"] = df["obv_mom"].diff(10).clip(-5, 5)
+
+    return df
+
+
+# ── 레짐 피처 ────────────────────────────────────────────
+
+def _regime_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    시장 레짐 피처 (추세 + 변동성 레짐).
+
+    이론:
+      - 추세 레짐: MA50 vs MA200 크로스오버 (Golden/Death Cross)
+          장기 상승 추세에서 모멘텀 전략 유효성 ↑
+      - 변동성 레짐: 단기 vs 장기 변동성 비율
+          고변동성 구간 = 레짐 전환 가능성 ↑ → 포지션 축소 필요
+      - 추세 강도: MA 기울기 정규화
+          완만한 기울기 = 추세 지속, 급격한 기울기 = 과열/과매도
+    """
+    c = df["Close"]
+    ret = np.log(c / c.shift(1))
+
+    ma50  = c.rolling(50,  min_periods=20).mean()
+    ma200 = c.rolling(200, min_periods=60).mean()
+
+    # 추세 방향 플래그 (0/1)
+    df["above_ma50"]   = (c > ma50).astype(np.float32)
+    df["above_ma200"]  = (c > ma200).astype(np.float32)
+    df["golden_cross"] = (ma50 > ma200).astype(np.float32)
+
+    # MA 기울기 (정규화) — 추세 강도
+    ma50_slope  = ma50.pct_change(5).fillna(0)
+    ma200_slope = ma200.pct_change(20).fillna(0)
+    for name, s in [("ma50_slope", ma50_slope), ("ma200_slope", ma200_slope)]:
+        mu = s.rolling(120, min_periods=20).mean()
+        sd = s.rolling(120, min_periods=20).std() + 1e-8
+        df[name] = ((s - mu) / sd).clip(-4, 4)
+
+    # 변동성 레짐 (단기 vs 장기 비율) — 이미 vol_regime 있지만 더 긴 기준 추가
+    short_vol = ret.rolling(10).std()  * np.sqrt(252)
+    long_vol  = ret.rolling(120).std() * np.sqrt(252)
+    df["vol_regime_120"] = (short_vol / (long_vol + 1e-9)).clip(0, 5)
+
+    # 가격 위치 채널 (52주 내 상대 위치 [0,1])
+    h252 = c.rolling(252, min_periods=60).max()
+    l252 = c.rolling(252, min_periods=60).min()
+    df["price_channel_pos"] = ((c - l252) / (h252 - l252 + 1e-9)).clip(0, 1)
+
+    return df
+
+
+# ── 포트폴리오 상태 피처 ───────────────────────────────────
 
 def compute_portfolio_features(
     position: float,

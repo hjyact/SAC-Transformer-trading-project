@@ -111,6 +111,7 @@ class TradingEnv(gym.Env):
 
         # 보상 계산용 히스토리 버퍼
         self._ret_history: list = []
+        self._price_ret_history: list = []   # 시장 수익률 히스토리 (포지션 무관)
 
     # ── 리셋 ──────────────────────────────────────────
 
@@ -208,6 +209,7 @@ class TradingEnv(gym.Env):
         self.peak_capital = self.cfg.initial_capital
         self._ret_history = []
         self._trade_count = 0
+        self._price_ret_history = []
 
         # DSR 상태 (Moody & Saffell 2001 §3.2):
         #   A_t : 수익률 EWMA 1차 모멘트
@@ -285,6 +287,7 @@ class TradingEnv(gym.Env):
         # B&H 스텝 수익률 (항상 100% 롱 포지션)
         bh_step_ret = price_ret
         self._bh_capital = self._bh_capital * (1.0 + price_ret)
+        self._price_ret_history.append(bh_step_ret)   # 시장 수익률 히스토리 (포지션 무관)
 
         # 행동 변화량: 현재 step 의 입력 action 과 직전 입력의 차
         action_delta = abs(target_pos - self.prev_action)
@@ -294,6 +297,16 @@ class TradingEnv(gym.Env):
         # 종료 조건
         terminated = self.capital <= self.cfg.initial_capital * 0.5  # 50% 손실
         truncated  = self._step_idx >= self._end
+
+        # v14: 에피소드 종료 시 터미널 alpha 보상 (신호대잡음비 문제 해결)
+        # v16: scale 100→30, clip ±1→±0.5 (B&H 과의존성 완화, Trades 증가 유도)
+        if terminated or truncated:
+            episode_alpha = (self.capital - self._bh_capital) / (float(self.cfg.initial_capital) + 1e-9)
+            # scale=30, inner_clip=±0.5:
+            #   alpha_step*30 강화로 step-wise 신호가 더 강해져 terminal 의존도 낮춤
+            #   v15에서 Trades=1-2로 B&H 고착화 → scale 축소로 거래 다양성 회복
+            terminal_bonus = float(np.clip(episode_alpha * 30.0, -0.5, 0.5))
+            reward = float(np.clip(reward + terminal_bonus, -5.0, 5.0))
 
         obs  = self._get_obs()
         info = self._get_info(step_ret, trade_cost, next_close)
@@ -353,16 +366,13 @@ class TradingEnv(gym.Env):
             mdd_pen   = cfg.drawdown_penalty * min(mdd_ratio, 0.0)
             cost_pen  = -cfg.risk_penalty * cost_norm * 100.0
             leverage_pen = -0.02 * max(0.0, abs(self.position) - 0.8) ** 2
-            # 포지션 없이 현금 보유하면 market uptrend를 놓치는 기회비용 패널티:
-            # long-only 시장에서 position≈0 전략이 Sharpe를 독점하는 함정 방지.
-            inaction_pen = -0.05 * (1.0 - abs(self.position)) * max(step_ret, 0.0) * 100.0
-
             # ── Alpha vs B&H 직접 보상 (핵심):
             # agent_step_ret - bh_step_ret = price_ret * (position - 1)
             # 상승장 현금 보유 → 음수 패널티, 하락장 현금 보유 → 양수 보상
             # 이 항이 없으면 Sharpe 최적화가 항상 현금 보유를 선호함.
+            inaction_pen = 0.0   # alpha_reward가 동일 신호를 제공하므로 중복 제거
             alpha_step = step_ret - bh_step_ret
-            alpha_reward = alpha_step * 10.0
+            alpha_reward = alpha_step * 30.0   # v16: step-wise 신호 3배 강화
 
             reward = (
                 sharpe * cfg.reward_scaling

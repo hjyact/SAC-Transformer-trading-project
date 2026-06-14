@@ -115,8 +115,8 @@ class EnvConfig:
     # eval_random_start=True: 다양한 시작점에서 평균 → OOS 통계 신뢰성 ↑
     eval_random_start: bool = True
 
-    # v9: 환경 레벨 거래 억제 추가 (gross alpha +0.22%에서 비용 절감으로 net positive 목표)
-    action_change_penalty: float = 0.1
+    # v16: 0.1→0.05 (거래 패널티 반감, Trades 5-15 목표)
+    action_change_penalty: float = 0.05
 
     # ── Differential Sharpe Ratio (Moody & Saffell 2001)
     # 매 step 의 Sharpe 증분을 보상으로 — risk-adjusted return 직접 최적화
@@ -222,7 +222,7 @@ class SACConfig:
     #    L_S : ‖π(s) - π(s + ε)‖     → 상태 섭동에 대한 강건성
     # λ_T=0.2 권장 — 0.05 는 Q 값에 묻혀 효과 없음. env-level action_change_penalty
     # 와 병행 (env 는 reward 즉답, actor-level 은 정책 부드러움).
-    caps_lambda_t: float    = 0.3           # v9: 약간 강화 (거래 횟수 감소 목표)
+    caps_lambda_t: float    = 0.15          # v16: 0.3→0.15 (행동 유연성 2배, Trades 증가 유도)
     caps_lambda_s: float    = 0.0           # S4RL state_aug 으로 대체 (sac_cfg.use_state_aug)
     caps_spatial_sigma: float = 0.05
 

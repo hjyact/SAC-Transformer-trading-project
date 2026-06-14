@@ -233,6 +233,8 @@ def _apply_args_to_configs(args) -> None:
         feat_cfg.use_macro = bool(args.use_macro)
     if hasattr(args, "use_frac_diff"):
         feat_cfg.use_frac_diff = bool(args.use_frac_diff)
+    if hasattr(args, "use_momentum"):
+        feat_cfg.use_momentum = bool(args.use_momentum)
 
     # ── Train-time Data Augmentation (env_cfg)
     if hasattr(args, "use_obs_jitter"):
@@ -424,12 +426,16 @@ def run_training(args):
             logger.info(f"   워밍업 단축: min_replay_size={agent.cfg.min_replay_size}")
 
             # 첫 평가로 best_sac 기준점 설정 (resume 후 첫 eval 이 무조건 best 되는 사고 방지)
-            logger.info("   기준 Sharpe 측정 중...")
+            logger.info("   기준 성능 측정 중...")
             init_eval = trainer._evaluate()
-            trainer._best_eval_score = init_eval["sharpe"]
+            best_metric = getattr(train_cfg, "best_metric", "sharpe")
+            # _evaluate()는 alpha_vs_bh 키가 없고 total_return+bh_return만 반환.
+            # _compute_best_metric()으로 올바른 기준점 계산 (sharpe/alpha_vs_bh/calmar 일관 처리)
+            trainer._best_eval_score = trainer._compute_best_metric(init_eval, best_metric)
             logger.info(
-                f"   기준 Sharpe={init_eval['sharpe']:.4f} | "
+                f"   기준 {best_metric}={trainer._best_eval_score:.4f} | "
                 f"TotalRet={init_eval['total_return']:+.2%} | "
+                f"BH={init_eval['bh_return']:+.2%} | "
                 f"MDD={init_eval['mdd']:+.2%}"
             )
         except FileNotFoundError:
@@ -509,13 +515,13 @@ def parse_args():
     p.add_argument("--start",     default="2018-01-01")
     p.add_argument("--end",       default="2024-12-31")
     p.add_argument("--interval",  default="1d")
-    p.add_argument("--steps",     type=int, default=200_000)
+    p.add_argument("--steps",     type=int, default=300_000)
     p.add_argument("--reward",    choices=["pnl","sharpe","sortino","mixed","dsr","dsr_cvar"],
                    default="mixed",
-                   help="dsr=Differential Sharpe (Moody-Saffell 2001), dsr_cvar=+CVaR penalty (Coache 2021)")
+                   help="mixed=alpha vs B&H 직접 보상 (기본), dsr=Differential Sharpe")
     p.add_argument("--episode-length", type=int, default=126, dest="episode_length",
-                   help="에피소드 길이 (126=반년, 252=1년). 짧을수록 random-start 다양성 ↑")
-    p.add_argument("--window-size",    type=int, default=30,  dest="window_size")
+                   help="에피소드 길이 (126=6개월 기본). 추세 학습에 충분한 기간 확보.")
+    p.add_argument("--window-size",    type=int, default=60,  dest="window_size")
     p.add_argument("--test-ratio",     type=float, default=0.2, dest="test_ratio")
     p.add_argument("--load",      default="best_sac",  help="로드할 체크포인트 이름 (확장자 .pt 제외)")
     p.add_argument("--resume",    action="store_true", default=False,
@@ -555,9 +561,9 @@ def parse_args():
     p.add_argument("--n-step",        dest="n_step", type=int, default=3,
                    help="N-step return (1=기본 SAC, 3~5 권장; variance vs bias)")
     p.add_argument("--reward-scaling", dest="reward_scaling", type=float, default=0.1,
-                   help="reward 스케일 (기본 0.1, Q값/π_loss 폭주 방지)")
-    p.add_argument("--gamma", dest="gamma", type=float, default=0.97,
-                   help="할인율 (기본 0.97, Q horizon ≈ 33 step. 장기 보유 전략이면 0.99)")
+                   help="reward 스케일 (mixed 모드 기본 0.1)")
+    p.add_argument("--gamma", dest="gamma", type=float, default=0.99,
+                   help="할인율 (기본 0.99, eff horizon ≈ 100 step. 추세 추종 필수.)")
     p.add_argument("--normalize-reward", dest="normalize_reward",
                    action="store_true", default=False,
                    help="Welford 온라인 보상 정규화 (기본 OFF — reward_scaling 과 충돌)")
@@ -568,8 +574,8 @@ def parse_args():
     p.add_argument("--droq",     dest="use_droq", action="store_true",  default=True,
                    help="DroQ: critic dropout + 높은 UTD (Hiraoka 2022 / 기본 ON)")
     p.add_argument("--no-droq",  dest="use_droq", action="store_false")
-    p.add_argument("--utd",      dest="utd_ratio", type=int, default=5,
-                   help="UTD ratio G (DroQ: critic 업데이트 횟수 / env step, 권장 3~5)")
+    p.add_argument("--utd",      dest="utd_ratio", type=int, default=2,
+                   help="UTD ratio G (DroQ: critic 업데이트 횟수 / env step, 기본 2)")
     p.add_argument("--critic-dropout", dest="critic_dropout", type=float, default=0.05,
                    help="DroQ critic dropout 확률 (기본 0.05)")
     p.add_argument("--weight-decay", dest="weight_decay", type=float, default=1e-4,
@@ -577,10 +583,10 @@ def parse_args():
     p.add_argument("--lap",      dest="use_lap", action="store_true",  default=True,
                    help="LAP: Huber + max(|δ|,λ) priority (Fujimoto 2020 / 기본 ON)")
     p.add_argument("--no-lap",   dest="use_lap", action="store_false")
-    p.add_argument("--caps-t",   dest="caps_lambda_t", type=float, default=0.2,
-                   help="CAPS temporal smoothness λ_T (Mysore 2021, 기본 0.2)")
+    p.add_argument("--caps-t",   dest="caps_lambda_t", type=float, default=0.3,
+                   help="CAPS temporal smoothness λ_T (Mysore 2021, 기본 0.2 — 과매매 억제)")
     p.add_argument("--reset-interval", dest="reset_interval", type=int, default=0,
-                   help="Primacy bias reset 주기 (gradient updates 기준, 0=off, 권장 50000)")
+                   help="Primacy bias reset 주기 (gradient updates 기준, 0=off 기본)")
     p.add_argument("--reset-mode", dest="reset_mode",
                    choices=["head", "full_critic", "shrink_perturb"],
                    default="shrink_perturb",
@@ -590,8 +596,8 @@ def parse_args():
     p.add_argument("--no-reset-actor", dest="reset_actor", action="store_false",
                    help="Critic 만 리셋 (Nikishin v1)")
     p.add_argument("--action-change-penalty", dest="action_change_penalty",
-                   type=float, default=0.5,
-                   help="env reward 에 -λ·|Δaction| 추가 (CAPS env-level, 기본 0.5)")
+                   type=float, default=0.1,
+                   help="env reward 에 -λ·|Δaction| 추가 (v9: 0.1로 거래 억제)")
 
     # ── DSR + CVaR 보상 파라미터 (Moody-Saffell 2001, Coache-Jaimungal 2021)
     p.add_argument("--dsr-eta",     dest="dsr_eta", type=float, default=0.01,
@@ -620,6 +626,12 @@ def parse_args():
                    action="store_true", default=True,
                    help="분수차분 피처 (기본 ON)")
     p.add_argument("--no-frac-diff",  dest="use_frac_diff", action="store_false")
+
+    # ── Momentum Features (Jegadeesh & Titman 1993)
+    p.add_argument("--use-momentum", dest="use_momentum",
+                   action="store_true", default=True,
+                   help="다중 주기 모멘텀 피처: ROC 1/3/6/12M, 52주 고가/저가 (기본 ON)")
+    p.add_argument("--no-momentum",  dest="use_momentum", action="store_false")
 
     # ── Train-time Data Augmentation (Iwana 2021, Wen 2021, Tobin 2017, Sinha 2022)
     # 모든 항목은 train 모드에서만 적용 — eval/실거래 경로 무영향.
@@ -657,12 +669,12 @@ def parse_args():
 
     # ── Transformer Actor/Critic (Parisotto 2020 / Nie 2023 / Kim 2022)
     # 단일 모델로 고정: GTrXL + PatchTST + RevIN 기반 Transformer-SAC.
-    p.add_argument("--trans-d-model", dest="trans_d_model", type=int, default=64,
-                   help="Transformer 모델 차원 (기본 64)")
-    p.add_argument("--trans-heads", dest="trans_n_heads", type=int, default=4,
-                   help="Multi-head attention head 수 (기본 4)")
-    p.add_argument("--trans-layers", dest="trans_n_layers", type=int, default=2,
-                   help="Transformer encoder layer 수 (기본 2)")
+    p.add_argument("--trans-d-model", dest="trans_d_model", type=int, default=128,
+                   help="Transformer 모델 차원 (기본 128)")
+    p.add_argument("--trans-heads", dest="trans_n_heads", type=int, default=8,
+                   help="Multi-head attention head 수 (기본 8)")
+    p.add_argument("--trans-layers", dest="trans_n_layers", type=int, default=3,
+                   help="Transformer encoder layer 수 (기본 3)")
     p.add_argument("--trans-dropout", dest="trans_dropout", type=float, default=0.1,
                    help="Transformer dropout (기본 0.1)")
     p.add_argument("--trans-no-revin", dest="trans_use_revin",
@@ -674,18 +686,17 @@ def parse_args():
 
     # ── Best 모델 선택 기준 + Early stopping
     p.add_argument("--best-metric", dest="best_metric",
-                   choices=["sharpe", "alpha_vs_bh", "calmar"], default="sharpe",
-                   help="best_sac 갱신 기준 (기본 sharpe — 강세장에서도 학습 진단 의미. "
-                        "실거래 평가는 alpha_vs_bh / calmar 도 같이 확인)")
-    p.add_argument("--best-min-margin", dest="best_min_margin", type=float, default=0.0,
-                   help="best 갱신 최소 마진. metric<margin 이면 갱신 X (기본 0.0, alpha_vs_bh 와 결합 시 음수 α 차단)")
-    p.add_argument("--early-stop-patience", dest="early_stop_patience", type=int, default=10,
-                   help="N회 연속 best 못 갱신 시 학습 중단 (0=off, 기본 10)")
+                   choices=["sharpe", "alpha_vs_bh", "calmar"], default="alpha_vs_bh",
+                   help="best_sac 갱신 기준 (alpha_vs_bh: B&H 초과수익 최적화)")
+    p.add_argument("--best-min-margin", dest="best_min_margin", type=float, default=-0.02,
+                   help="best 갱신 최소 마진 (기본 -0.02: B&H 2pct 이내 모델도 저장)")
+    p.add_argument("--early-stop-patience", dest="early_stop_patience", type=int, default=0,
+                   help="N회 연속 best 못 갱신 시 학습 중단 (0=off 기본)")
     p.add_argument("--eval-episodes", dest="eval_episodes", type=int, default=5,
-                   help="평가 시 다양한 시작점에서 N회 평균 (기본 5)")
+                   help="평가 시 N회 평균 (기본 5)")
     p.add_argument("--eval-random-start", dest="eval_random_start",
                    action="store_true", default=True,
-                   help="eval 시 random start 활성 (다양한 OOS 시작점 평균, 기본 ON)")
+                   help="eval 시 random start 활성 (기본 ON — 다양한 구간 평균)")
     p.add_argument("--no-eval-random-start", dest="eval_random_start", action="store_false")
 
     return p.parse_args()

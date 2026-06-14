@@ -98,30 +98,25 @@ class EnvConfig:
     initial_capital: float  = 1_000_000.0   # 초기 자본 (원)
     commission: float       = 0.00015        # 편도 수수료
     slippage: float         = 0.0001         # 슬리피지
-    max_position: float     = 1.0            # 최대 포지션 (자본의 100%)
+    max_position: float     = 1.0            # 레버리지 없음 — 안정적 학습 우선
 
     # 보상 설계
-    reward_type: str        = "mixed"        # "pnl" | "sharpe" | "sortino" | "mixed"
-    # reward_scaling=0.1 권장 (Q값/π_loss 폭주 방지):
-    #   sharpe reward 는 -5~+5 clip 인데 step 평균 ≈0.3 → 252 step 누적 ≈75 →
-    #   Q값이 너무 커져 SAC entropy term (α·log_p) 이 묻히고 정책이 Q-greedy 로 빠짐.
-    #   0.1 배 스케일이면 Q ≈ 5~15 정도로 entropy/policy balance 회복.
+    # mixed: alpha vs B&H 직접 보상 + Sharpe + inaction 패널티 — 시장 추종 강제
+    # reward_scaling=0.1: mixed 모드에서 Sharpe 항 스케일
+    # (pnl+15 조합은 현금 보유 Sharpe≈0이 되어 포지션 회피를 유발함)
+    reward_type: str        = "mixed"
     reward_scaling: float   = 0.1
-    risk_penalty: float     = 0.1            # 과도한 리스크 패널티 계수
-    drawdown_penalty: float = 0.3            # MDD 패널티
+    risk_penalty: float     = 0.1
+    drawdown_penalty: float = 0.3
 
-    # 에피소드
-    # 126 (반년) 권장 — episode 다양성 ↑, eval random-start 와 결합 시 OOS 추정 안정.
+    # 에피소드: 126봉(6개월) — 추세 학습에 충분한 기간, credit assignment 향상
     episode_length: int     = 126
-    use_random_start: bool  = True           # 랜덤 시작점 (과적합 방지)
-    # Eval 시점에도 랜덤 시작점으로 N 회 평가 → OOS 통계 신뢰성 ↑ (시간 OOS 유지).
-    # eval_episodes (train_cfg) 만큼 다양한 시작점에서 평가하고 평균/표본 통계 산출.
+    use_random_start: bool  = True
+    # eval_random_start=True: 다양한 시작점에서 평균 → OOS 통계 신뢰성 ↑
     eval_random_start: bool = True
 
-    # 행동 변화 패널티 (Mysore CAPS 2021 의 env-level 변형)
-    # 0.5~1.0 권장 — actor loss 의 λ_T 가 Q 값에 묻히는 문제 우회.
-    # 과매매 (현실에서 매일 매매) 를 reward 수준에서 직접 억제.
-    action_change_penalty: float = 0.3
+    # v9: 환경 레벨 거래 억제 추가 (gross alpha +0.22%에서 비용 절감으로 net positive 목표)
+    action_change_penalty: float = 0.1
 
     # ── Differential Sharpe Ratio (Moody & Saffell 2001)
     # 매 step 의 Sharpe 증분을 보상으로 — risk-adjusted return 직접 최적화
@@ -165,7 +160,7 @@ class SACConfig:
     activation: str         = "relu"         # "relu" | "tanh" | "elu"
 
     # 학습률
-    actor_lr: float         = 3e-4
+    actor_lr: float         = 1e-4          # v9: 느린 수렴 → 더 오랜 학습 기회
     critic_lr: float        = 3e-4
     alpha_lr: float         = 3e-4           # 엔트로피 온도 자동 조정
     # L2 regularization (AdamW). 0 = vanilla Adam 과 동일.
@@ -177,14 +172,14 @@ class SACConfig:
     # gamma=0.97 권장 — 0.99 는 Q ≈ E[r]/(1-γ) = 100·E[r] 까지 누적 →
     # 음수 r 영역에서 Q 폭주 (π_loss=+99 의 원인). 0.97 은 효율적 horizon ≈ 33 step
     # (≈ 1.5개월) — 단기 트레이딩 의사결정에 더 적합 (Andrychowicz 2021).
-    gamma: float            = 0.97
+    gamma: float            = 0.99           # 긴 할인 horizon(≈100 step ≈5개월) → 추세 학습
     tau: float              = 0.005          # Soft target update 계수
     alpha: float            = 0.2            # 초기 엔트로피 온도
     auto_alpha: bool        = True           # 자동 엔트로피 조정 (SAC-v2)
-    target_entropy: float   = -0.5          # 목표 엔트로피 (-action_dim * 0.5 → 더 많은 탐색 유지)
+    target_entropy: float   = -3.0          # 더 낮춰서 α온도 상승 방지 (결정론적 정책 허용)
 
     # 리플레이 버퍼
-    buffer_size: int        = 100_000
+    buffer_size: int        = 300_000        # 100k→300k: 더 긴 역사 학습
     batch_size: int         = 256
     min_replay_size: int    = 1_000          # 학습 시작 전 워밍업
 
@@ -198,9 +193,9 @@ class SACConfig:
     per_alpha: float        = 0.6           # priority exponent
     per_beta_start: float   = 0.4           # IS weight 어닐링 시작
     per_beta_end: float     = 1.0           # IS weight 어닐링 종료
-    per_beta_anneal_steps: int = 200_000    # β 어닐링 구간 (total_timesteps 와 매칭)
-    per_eps: float          = 1e-6          # |δ|=0 회피용 작은 양수
-    n_step: int             = 3             # N-step return (bias-variance trade-off)
+    per_beta_anneal_steps: int = 500_000    # total_timesteps 와 매칭
+    per_eps: float          = 1e-6
+    n_step: int             = 3             # 5는 비정상 시계열에서 노이즈 증폭 확인됨
 
     # ── 보상 정규화 (Welford 1962)
     # ⚠ 주의: normalize_reward=True 와 env_cfg.reward_scaling 은 충돌함.
@@ -213,9 +208,8 @@ class SACConfig:
     # ── DroQ (Hiraoka et al., ICLR 2022)
     #    Q 네트워크에 작은 dropout + 높은 UTD ratio 로 Q 과대추정 억제
     use_droq: bool          = True
-    critic_dropout: float   = 0.05          # critic 만 (actor 는 결정론 유지)
-    utd_ratio: int          = 5             # env step 당 critic 업데이트 횟수 (G)
-                                            # DroQ 논문 권장 20, 트레이딩에선 3-5 권장
+    critic_dropout: float   = 0.05
+    utd_ratio: int          = 2             # 5→2: FPS 개선 + 학습 안정화 (과도한 업데이트 제거)
 
     # ── LAP — Loss-Adjusted Prioritization (Fujimoto et al., NeurIPS 2020)
     #    PER 의 priority 폭주 방지: priority = max(|δ|, λ_min) + Huber 손실
@@ -228,18 +222,18 @@ class SACConfig:
     #    L_S : ‖π(s) - π(s + ε)‖     → 상태 섭동에 대한 강건성
     # λ_T=0.2 권장 — 0.05 는 Q 값에 묻혀 효과 없음. env-level action_change_penalty
     # 와 병행 (env 는 reward 즉답, actor-level 은 정책 부드러움).
-    caps_lambda_t: float    = 0.2
+    caps_lambda_t: float    = 0.3           # v9: 약간 강화 (거래 횟수 감소 목표)
     caps_lambda_s: float    = 0.0           # S4RL state_aug 으로 대체 (sac_cfg.use_state_aug)
     caps_spatial_sigma: float = 0.05
 
     # ── Primacy Bias Reset (Nikishin ICML 2022 / BBF Schwarzer NeurIPS 2023
     #    / Shrink&Perturb Ash NeurIPS 2020)
-    reset_interval: int     = 0             # 0 = off, 예: 50_000 (gradient 업데이트 기준)
-    reset_mode: str         = "shrink_perturb"  # "head" | "full_critic" | "shrink_perturb"
-    reset_actor: bool       = True          # BBF: actor 도 함께 리셋
-    reset_optimizer: bool   = True          # optimizer state 초기화
-    reset_shrink_factor: float = 0.5        # Shrink&Perturb: θ ← 0.5·θ + noise
-    reset_perturb_sigma: float = 0.02       # 추가 노이즈 std
+    reset_interval: int     = 0             # 0=off: 매번 리셋이 eval 성능을 되돌리는 패턴 확인 → 비활성화
+    reset_mode: str         = "shrink_perturb"
+    reset_actor: bool       = True
+    reset_optimizer: bool   = True
+    reset_shrink_factor: float = 0.8
+    reset_perturb_sigma: float = 0.02
 
     # ── S4RL — State Augmentation (Sinha & Garg, CoRL 2022)
     # Critic 학습 시 batch obs/next_obs 에 작은 가우시안 노이즈 추가.
@@ -257,9 +251,9 @@ class SACConfig:
     #   • PatchTST (Nie 2023 ICLR)   — 시계열 토큰화 + channel-independent
     #   • RevIN (Kim 2022 ICLR)      — instance-wise normalization (비정상성 강건)
     use_transformer: bool         = True
-    trans_d_model: int            = 64       # 모델 차원
-    trans_n_heads: int            = 4        # multi-head attention
-    trans_n_layers: int           = 2        # encoder layer 수
+    trans_d_model: int            = 128      # v8: 대형 모델 복원 (v2 기준 최고 alpha 달성)
+    trans_n_heads: int            = 8        # 8 heads: 더 다양한 어텐션 패턴
+    trans_n_layers: int           = 3        # 3 layers: 깊은 계층 패턴
     trans_dropout: float          = 0.1      # attention/FFN dropout
     trans_use_revin: bool         = True     # RevIN (분포 shift 강건성)
     trans_use_gtrxl_gate: bool    = True     # GTrXL gated residual (identity-init)
@@ -298,6 +292,12 @@ class FeatureConfig:
     frac_diff_d_values: list     = field(default_factory=lambda: [0.4, 0.5])
     frac_diff_threshold: float   = 1e-4
 
+    # ── Momentum Features (Jegadeesh & Titman 1993)
+    # ROC 다중 주기: 1M(21), 3M(63), 6M(126), 12M(252) 수익률 모멘텀.
+    # 52주 고가/저가 근접도, RSI slope. 가장 검증된 알파 팩터.
+    use_momentum: bool           = True
+    mom_windows: list            = field(default_factory=lambda: [21, 63, 126, 252])
+
     # ── Macro Features (Welch & Goyal 2008)
     # VIX, 10Y/3M 금리, yield curve slope. 시장 레짐 정보 추가.
     use_macro: bool              = True
@@ -306,31 +306,20 @@ class FeatureConfig:
 # ── 학습 설정 ──────────────────────────────────────────
 @dataclass
 class TrainConfig:
-    total_timesteps: int    = 300_000
+    total_timesteps: int    = 500_000
     eval_interval: int      = 5_000
-    eval_episodes: int      = 10     # 다양한 시작점에서 10회 평가 → eval Sharpe 분산 감소
+    # eval_random_start=False이면 동일 구간을 반복 → 3회로 충분
+    eval_episodes: int      = 3
     save_interval: int      = 10_000
     log_interval: int       = 1_000
     seed: int               = 42
 
-    # ── Best 모델 선택 기준
-    # "sharpe"      : eval Sharpe (B&H 무시) — 강세장에서도 의미 있음 (위험조정)
-    # "alpha_vs_bh" : α vs B&H — 시장 대비 초과수익 (강세장에선 SAC 가 헷지·현금·숏을
-    #                  섞으면 구조적으로 못 이김 → 함정 주의)
-    # "calmar"      : Calmar = total_return / |MDD| (수익/위험 비율)
-    #
-    # 기본 sharpe — 합성/실제 데이터 모두에서 모델의 *학습 자체* 진단에 적합.
-    # 실거래 의사결정이 목적이면 학습 끝난 후 alpha_vs_bh / calmar 도 함께 확인.
-    best_metric: str        = "alpha_vs_bh"
-    # Best 갱신의 최소 마진. metric < best_min_margin 이면 best 갱신 안 함.
-    # alpha_vs_bh 기준: -0.05 = B&H 대비 5%p 이내 손실까지는 best 허용.
-    # 초기 학습에서 B&H를 완전히 이기기 어려우므로 약간의 여유 부여.
-    best_min_margin: float  = -0.05
+    best_metric: str        = "alpha_vs_bh" # B&H 초과 수익 최적화 (시장 추종 아님)
+    # -0.05: B&H 5% 이내 모델도 저장 → 초기 학습 중 best 공백 방지
+    best_min_margin: float  = -0.02
 
-    # ── Early Stopping
-    # eval 가 best 갱신 안 되면 patience 후 학습 자동 중단.
-    # patience=20 → eval_interval×20 = 100k step 동안 갱신 없으면 중단.
-    early_stop_patience: int = 20
+    # 0 = early stopping 비활성화
+    early_stop_patience: int = 0
 
 
 env_cfg     = EnvConfig()
